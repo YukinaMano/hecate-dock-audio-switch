@@ -1,0 +1,56 @@
+﻿name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compile
+        shell: pwsh
+        run: ./build.ps1
+
+      - name: Assemble package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path pkg | Out-Null
+          Copy-Item dist/G5DockSwitch.exe   pkg/
+          Copy-Item install.ps1             pkg/
+          Copy-Item uninstall.ps1           pkg/
+          Copy-Item config.ini.example      pkg/
+          Copy-Item README.md               pkg/
+          Copy-Item README.en.md            pkg/
+          Copy-Item LICENSE                 pkg/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: G5DockSwitch
+          path: pkg/
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: G5DockSwitch
+          path: pkg
+
+      - name: Zip the package
+        run: |
+          cd pkg
+          zip -r "../HECATE-DockAudioSwitch-${{ github.ref_name }}.zip" .
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: HECATE-DockAudioSwitch-${{ github.ref_name }}.zip
+          generate_release_notes: true
+

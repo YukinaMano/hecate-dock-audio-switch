@@ -1,0 +1,14 @@
+﻿# Optional overrides. Copy this file to config.ini next to G5DockSwitch.exe.
+# Defaults match HECATE G5 MAX dock version (wireless, Pid_A228).
+
+# USB vendor id of the dock (hex, no 0x)
+vid=35BB
+
+# USB product id of the dock. Wired version is reported as A229.
+pid=A228
+
+# Device description prefix of the audio endpoint (matched case-insensitively).
+desc=HECATE
+
+# Which HID collection carries the status frames.
+iface=MI_04&Col03

@@ -1,0 +1,14 @@
+# build output
+dist/
+bin/
+obj/
+.vs/
+
+# runtime files
+*.log
+probe.txt
+capture.log
+config.ini
+last-state.txt
+last-default.txt
+override.txt
