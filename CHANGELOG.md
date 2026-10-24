@@ -1,4 +1,13 @@
-# Changelog
+﻿# Changelog
+
+## 0.1.1
+
+- fix: reopen the HID handle when no frame arrived for 120 s (covers a handle opened before the dock finished
+  enumerating during logon, which otherwise stayed deaf forever)
+- fix: delay the first open by 5 s after startup for the same reason
+- add: warn in the log when the Edifier driver (HECATE.exe) is running, because it consumes the same HID input
+  queue and silently disables auto-switching
+- docs: document the driver conflict and the reboot failure mode in both READMEs
 
 ## 0.1.0
 

@@ -1,4 +1,4 @@
-# Auto-switch the playback device for dock-charging headsets (HECATE G5 MAX dock version)
+﻿# Auto-switch the playback device for dock-charging headsets (HECATE G5 MAX dock version)
 
 English | [简体中文](README.md)
 
@@ -13,6 +13,11 @@ So I built a small background tool that does it for me. Once installed:
 | Put it back on the base | Voice prompt "power off" | Audio switches back to the previous speakers |
 
 No driver to install, no window, starts automatically at logon.
+
+> **Do not keep the Edifier driver (HECATE.exe) open.** The driver and this tool compete for the same HID
+> input queue on the dock — whoever reads first wins. While the driver is running this tool receives no status
+> frames and auto-switching stops. Only one of them can own the data: close the driver and let the tool work
+> (the driver does not start automatically anyway).
 
 ## Quick start
 
@@ -226,6 +231,29 @@ A: Only verified on the HECATE G5 MAX dock version. Other dock models from the s
 
 A: Open source, single file, no third-party dependencies, buildable yourself with `build.ps1`, no network access, no data collection.
 
+**Q12: Auto-switch does not work while the Edifier driver is open.**
+
+A: That is expected. The driver (HECATE.exe) and this tool **compete for the same HID input queue** on the
+dock — whoever reads first wins. While the driver is running it drains every status frame and this tool sees
+nothing. The only fix is to **close the driver**.
+
+The driver does not start automatically, so after a normal reboot it will not appear by itself; if you open it
+manually, it takes over. The tool logs this explicitly:
+
+```
+warn: Edifier driver (HECATE.exe) is running - it consumes the dock HID reports, auto-switch is inactive until it is closed
+```
+
+**Q13: Auto-switch stops working after a reboot.**
+
+A: Versions before v0.1.1 had this defect: if the handle was opened before the dock finished enumerating, it
+stayed deaf forever. Since v0.1.1 there are two guards: a 5 second delay before the first open, and an
+automatic **handle reopen after 120 seconds without any frame**. Look for these log lines:
+
+```
+hid: listening ...
+hid: no frames for 120s, reopening handle
+```
 **Q11: I want to force a switch manually.**
 
 A: Run in the extracted folder:

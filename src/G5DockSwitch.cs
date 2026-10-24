@@ -37,6 +37,13 @@ internal static class Program
     static string hsId = "";      // {0.0.0.00000000}.{guid}
     static string hsGuid = "";    // {guid}
 
+    const int IdleReopenSec   = 120;   // reopen the handle if nothing arrives for this long (covers a stale handle opened during logon)
+    const int DriverCheckSec  = 15;
+
+    static DateTime lastFrameUtc = DateTime.UtcNow;
+    static DateTime lastDriverCheck = DateTime.MinValue;
+    static bool driverRunning = false;
+
     static string applied = "";
     static string curState = "";
     static string lastHex = "";
@@ -220,6 +227,7 @@ internal static class Program
     static void Run()
     {
         Log("=== start pid=" + System.Diagnostics.Process.GetCurrentProcess().Id + " ===");
+        Thread.Sleep(5000);   // let the dock finish enumerating after logon
         Resolve();
         if (hidPath.Length == 0) Log("warn: dock HID interface not found yet");
         if (hsId.Length == 0) Log("warn: headset audio endpoint not found yet");
@@ -253,12 +261,39 @@ internal static class Program
                     h = OpenHid(hidPath);
                     if (h == new IntPtr(-1)) { Thread.Sleep(2000); continue; }
                     ev = CreateEvent(IntPtr.Zero, true, false, null);
+                    lastFrameUtc = DateTime.UtcNow;
                     Log("hid: listening " + hidPath);
+                }
+
+                // watchdog: a handle opened while the dock was still coming up can end up deaf forever
+                if (h != new IntPtr(-1) && (DateTime.UtcNow - lastFrameUtc).TotalSeconds > IdleReopenSec)
+                {
+                    Log("hid: no frames for " + IdleReopenSec + "s, reopening handle");
+                    CloseHandle(h); CloseHandle(ev);
+                    h = new IntPtr(-1); ev = IntPtr.Zero;
+                    lastFrameUtc = DateTime.UtcNow;
+                    Thread.Sleep(500);
+                    continue;
+                }
+
+                // the vendor app and this tool compete for the same HID input queue: whichever reads first wins
+                if ((DateTime.UtcNow - lastDriverCheck).TotalSeconds > DriverCheckSec)
+                {
+                    lastDriverCheck = DateTime.UtcNow;
+                    bool running = false;
+                    try { running = System.Diagnostics.Process.GetProcessesByName("HECATE").Length > 0; } catch { }
+                    if (running != driverRunning)
+                    {
+                        driverRunning = running;
+                        if (running) Log("warn: Edifier driver (HECATE.exe) is running - it consumes the dock HID reports, auto-switch is inactive until it is closed");
+                        else Log("info: Edifier driver closed - listening should resume");
+                    }
                 }
 
                 byte[] f = ReadOnce(h, ev, buf, 900);
                 if (f != null && f.Length >= 4)
                 {
+                    lastFrameUtc = DateTime.UtcNow;
                     string hex = Hex(f, Math.Min(f.Length, 14));
                     string st = Decode(f);
                     if (hex != lastHex)
