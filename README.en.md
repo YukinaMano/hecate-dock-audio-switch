@@ -1,4 +1,4 @@
-﻿# Auto-switch the playback device for dock-charging headsets (HECATE G5 MAX dock version)
+# Auto-switch the playback device for dock-charging headsets (HECATE G5 MAX dock version)
 
 English | [简体中文](README.md)
 
@@ -91,11 +91,11 @@ Any approach that waits for the device to disconnect is therefore doomed; the en
 
 ### How it works
 
-In one sentence: **listen to the status frames the base pushes, and hide/show the headset audio endpoint accordingly.**
+In one sentence: **ask the base for its current state once a second, and hide/show the headset audio endpoint accordingly.**
 
-#### 1. Data source: frames pushed by the base
+#### 1. Data source: active polling
 
-The base **pushes** 64-byte status frames on the HID control interface `MI_04 & Col03`; no host polling is needed:
+Write one 64-byte query frame to the HID control interface `MI_04 & Col03` and the base answers immediately with its current state (measured under 20 ms):
 
 ```
 D0 35 BB <cmd> <sub> <payload ...> ... 04
@@ -120,10 +120,12 @@ on the base D0 35 BB 0A 00 00 00 00 00 00 00 01 01 03 ... 04
 
 #### 2. Four pitfalls
 
-1. **Do not poll.** If you write a `0x0A` query yourself, the base answers with a **stale record unrelated to the headset** (always `00 64 01 00 00 00`). The first version of this tool polled, and was wrong for a long time because of it.
+1. **You must poll.** The base only reports reliably when asked; after a full power cycle it stops pushing on its own, and a passive listener goes blind. An early version listened passively and received nothing after a reboot.
 2. **All zeros = on the base**, not a data error. It means the headset is powered off and reports nothing.
 3. **`01 64 00 ...` = in use**, not "charging". I once treated byte 5 as a charging flag; when the battery filled up the flag disappeared, the state was misread as "left the base", and audio went to a headset that was switched off.
-4. **Pushes are event driven**, there is no periodic heartbeat. That is why the last known state from `last-state.txt` is applied once at startup.
+4. **Pushes are unreliable**: the base pushes nothing while the headset is disconnected, and after a cold boot pushes may stop entirely. Polling covers this; `last-state.txt` is only used to restore the previous state before the first answer arrives.
+5. **The handle must be opened for read+write.** The query itself is an output report, so a read-only handle cannot send it — an early version failed exactly this way, silently: no answers and no errors in the log.
+6. **`00 64 01 00 00 00` shows up occasionally.** It is not a valid state; Decode drops it (logged as `ignored`).
 
 #### 3. The switch itself
 

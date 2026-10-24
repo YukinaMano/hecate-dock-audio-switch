@@ -239,7 +239,7 @@ internal static class Program
             ApplyState(applied, false);
         }
 
-        IntPtr h = new IntPtr(-1), ev = IntPtr.Zero;
+        IntPtr h = new IntPtr(-1), ev = IntPtr.Zero, evW = IntPtr.Zero;
         byte[] buf = new byte[256];
         DateTime lastResolve = DateTime.UtcNow;
 
@@ -261,6 +261,7 @@ internal static class Program
                     h = OpenHid(hidPath);
                     if (h == new IntPtr(-1)) { Thread.Sleep(2000); continue; }
                     ev = CreateEvent(IntPtr.Zero, true, false, null);
+                    evW = CreateEvent(IntPtr.Zero, true, false, null);
                     lastFrameUtc = DateTime.UtcNow;
                     Log("hid: listening " + hidPath);
                 }
@@ -268,9 +269,9 @@ internal static class Program
                 // watchdog: a handle opened while the dock was still coming up can end up deaf forever
                 if (h != new IntPtr(-1) && (DateTime.UtcNow - lastFrameUtc).TotalSeconds > IdleReopenSec)
                 {
-                    Log("hid: no frames for " + IdleReopenSec + "s, reopening handle");
-                    CloseHandle(h); CloseHandle(ev);
-                    h = new IntPtr(-1); ev = IntPtr.Zero;
+                    Log("hid: no answer for " + IdleReopenSec + "s, reopening handle");
+                    CloseHandle(h); CloseHandle(ev); CloseHandle(evW);
+                    h = new IntPtr(-1); ev = IntPtr.Zero; evW = IntPtr.Zero;
                     lastFrameUtc = DateTime.UtcNow;
                     Thread.Sleep(500);
                     continue;
@@ -290,8 +291,22 @@ internal static class Program
                     }
                 }
 
-                byte[] f = ReadOnce(h, ev, buf, 900);
-                if (f != null && f.Length >= 4)
+                byte[] f = Query(h, ev, evW, buf, 1200);
+                if (f == null)
+                {
+                    lastFrameUtc = DateTime.UtcNow;
+                    if (LastWriteState == 1)
+                    {
+                        // the write never came back: the control channel is stuck, only a new handle helps
+                        Log("hid: query blocked, reopening handle");
+                        CloseHandle(h); CloseHandle(ev); CloseHandle(evW);
+                        h = new IntPtr(-1); ev = IntPtr.Zero; evW = IntPtr.Zero;
+                        Thread.Sleep(500);
+                    }
+                    Thread.Sleep(300);
+                    continue;
+                }
+                if (f.Length >= 4)
                 {
                     lastFrameUtc = DateTime.UtcNow;
                     string hex = Hex(f, Math.Min(f.Length, 14));
@@ -323,13 +338,15 @@ internal static class Program
                     if (ov == "inuse" || ov == "docked") desired = ov;
                 }
                 if (desired.Length > 0 && hsId.Length > 0) Enforce(desired);
+                Thread.Sleep(400);
             }
             catch (Exception ex)
             {
                 Log("error: " + ex.Message);
                 if (h != IntPtr.Zero && h != new IntPtr(-1)) CloseHandle(h);
                 if (ev != IntPtr.Zero) CloseHandle(ev);
-                h = new IntPtr(-1); ev = IntPtr.Zero;
+                if (evW != IntPtr.Zero) CloseHandle(evW);
+                h = new IntPtr(-1); ev = IntPtr.Zero; evW = IntPtr.Zero;
                 Thread.Sleep(2000);
             }
         }
@@ -342,8 +359,10 @@ internal static class Program
     //     on base  : 00 00 00 00 00 00   (headset is powered down, no telemetry)
     // 0x03 frame, byte 4: EF = in use, 01 = on base
     //
-    // Do NOT poll the dock yourself: a self-issued 0x0A query returns a different, stale record
-    // (00 64 01 00 00 00) that does not track the headset. Only pushed frames are reliable.
+    // The dock answers a 0x0A output report with one status frame holding the real current state,
+    // so the tool polls instead of waiting for pushes: pushes stop after a cold boot (the dongle's
+    // report channel stays silent until the host asks), which made a passive listener go blind.
+    // A 0x0A answer of 00 64 01 00 00 00 appears occasionally and is ignored by Decode.
 
     static string Decode(byte[] f)
     {
@@ -553,6 +572,8 @@ internal static class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool ReadFile(IntPtr h, byte[] buf, uint n, out uint read, ref OVERLAPPED ov);
     [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool WriteFile(IntPtr h, byte[] buf, uint n, out uint written, ref OVERLAPPED ov);
+    [DllImport("kernel32.dll", SetLastError = true)]
     static extern bool GetOverlappedResult(IntPtr h, ref OVERLAPPED ov, out uint read, bool wait);
     [DllImport("kernel32.dll", SetLastError = true)]
     static extern IntPtr CreateEvent(IntPtr sa, bool manual, bool initial, string name);
@@ -567,9 +588,68 @@ internal static class Program
 
     static IntPtr OpenHid(string path)
     {
-        return CreateFile(path, 0x80000000u, 3, IntPtr.Zero, 3, 0x40000000u, IntPtr.Zero);
+        // read + write: the status query is an output report, a read-only handle cannot send it
+        IntPtr h = CreateFile(path, 0xC0000000u, 3, IntPtr.Zero, 3, 0x40000000u, IntPtr.Zero);
+        if (h == new IntPtr(-1))
+        {
+            int err = Marshal.GetLastWin32Error();
+            Log("hid: read+write open failed (err=" + err + "), falling back to read-only");
+            h = CreateFile(path, 0x80000000u, 3, IntPtr.Zero, 3, 0x40000000u, IntPtr.Zero);
+        }
+        return h;
     }
 
+    // The dock answers a 0x0A write with one status frame carrying the real current state.
+    // A write may block on a device whose control channel is stuck, so it is always bounded and
+    // callers reopen the handle when it does not come back in time.
+    static int LastWriteState = 0;   // 0 = ok, 1 = blocked, 2 = error
+    static byte[] Query(IntPtr h, IntPtr evR, IntPtr evW, byte[] buf, int timeoutMs)
+    {
+        LastWriteState = 0;
+        var frame = new byte[64];
+        frame[0] = 0xD0; frame[1] = 0x35; frame[2] = 0xBB; frame[3] = 0x0A; frame[63] = 0x04;
+
+        // arm the read first so the answer cannot be missed
+        var ovR = new OVERLAPPED(); ovR.hEvent = evR;
+        ResetEvent(evR);
+        uint rd = 0;
+        bool readImmediate = ReadFile(h, buf, 64, out rd, ref ovR);
+        int eR = Marshal.GetLastWin32Error();
+
+        var ovW = new OVERLAPPED(); ovW.hEvent = evW;
+        ResetEvent(evW);
+        uint wr = 0;
+        bool okW = WriteFile(h, frame, 64, out wr, ref ovW);
+        int eW = Marshal.GetLastWin32Error();
+        if (!okW && eW == 997)
+        {
+            if (WaitForSingleObject(evW, 1500) != 0)
+            {
+                CancelIoEx(h, IntPtr.Zero);
+                uint j; GetOverlappedResult(h, ref ovW, out j, true);
+                uint k; GetOverlappedResult(h, ref ovR, out k, true);
+                LastWriteState = 1;
+                return null;
+            }
+            uint w2;
+            GetOverlappedResult(h, ref ovW, out w2, false);
+        }
+        else if (!okW) LastWriteState = 2;
+
+        if (readImmediate) { var r0 = new byte[rd]; Array.Copy(buf, r0, (int)rd); return r0; }
+        if (eR != 997) return null;
+        uint res = WaitForSingleObject(evR, (uint)timeoutMs);
+        if (res != 0)
+        {
+            CancelIoEx(h, IntPtr.Zero);
+            uint j2; GetOverlappedResult(h, ref ovR, out j2, true);
+            return null;
+        }
+        if (!GetOverlappedResult(h, ref ovR, out rd, false)) return null;
+        var r = new byte[rd];
+        Array.Copy(buf, r, (int)rd);
+        return r;
+    }
     static byte[] ReadOnce(IntPtr h, IntPtr ev, byte[] buf, int timeoutMs)
     {
         var ov = new OVERLAPPED();

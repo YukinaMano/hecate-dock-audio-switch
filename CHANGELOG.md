@@ -1,4 +1,16 @@
-﻿# Changelog
+# Changelog
+
+## 0.1.2
+
+- fix: poll the dock once a second instead of waiting for pushes. Pushes stop after a cold boot
+  (the dongle stays silent until the host asks), so the passive listener from 0.1.1 went blind and
+  never recovered — not even after a reboot.
+- fix: open the HID handle for read+write. The query is an output report; a read-only handle silently
+  failed to send it, which is why 0.1.1's watchdog kept reopening a handle that could never work.
+- fix: bound the query write at 1.5 s and reopen the handle when it blocks (the channel sometimes
+  stalls); a blocked write used to hang the loop.
+- docs: rewrite the "never poll" advice in both READMEs and docs/protocol.md — it was wrong.
+  Add pitfalls 5 (read+write handle) and 6 (the occasional 00 64 01 record is ignored).
 
 ## 0.1.1
 
